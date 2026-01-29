@@ -12,6 +12,20 @@ st.set_page_config(page_title="Aktienbewertung – Profi-Score (0–100)", layou
 # =========================================================
 # 1) Öffentliche Haupt-Watchlist (Ticker + Name) – immer sichtbar
 # =========================================================
+DEFAULT_WATCHLIST = [
+    "IWDA.L",      # iShares Core MSCI World (LSE)
+    "EIMI.L",      # iShares MSCI Emerging Markets (LSE)
+    "SMT.L",       # Scottish Mortgage Trust
+    "ABBN.SW",     # ABB (Schweiz)
+    "AAPL",        # Apple
+    "KO",          # Coca-Cola
+    "META",        # Meta Platforms
+    "NFLX",        # Netflix
+    "NVDA",        # NVIDIA
+    "CRWD",        # CrowdStrike
+    "NTLA",        # Intellia Therapeutics
+    "NOVO-B.CO"    # Novo Nordisk B (Kopenhagen)
+]
 MASTER_WATCHLIST = [
     {"ticker": "AAPL", "name": "Apple Inc."},
     {"ticker": "MSFT", "name": "Microsoft Corp."},
@@ -981,3 +995,4 @@ else:
 # yfinance
 # requests
 # =========================================================
+
