@@ -28,8 +28,6 @@ MASTER_WATCHLIST = [
     {"ticker": "NET", "name": "Cloudflare Inc."},
     {"ticker": "XOM", "name": "Exxon Mobil Corp."},
     {"ticker": "NTLA", "name": "Intellia Therapeutics Inc."},
-
-    # DACH/EU – Yahoo-Suffixe:
     {"ticker": "ALV.DE", "name": "Allianz SE"},
     {"ticker": "MUV2.DE", "name": "Münchener Rückversicherung AG"},
     {"ticker": "RHM.DE", "name": "Rheinmetall AG"},
@@ -46,27 +44,29 @@ MASTER_WATCHLIST = [
 ]
 
 # =========================================================
-# 2) Profi-Logik: Branchen-Profile + Gewichtung + Schwellen
-#    Score 0–100 + Red-Flags + Entscheidung
+# 2) Profi-Score: verschärft + Kategorien
+#    - Score 0–100 (gewichtete Ampeln)
+#    - härteres Punktesystem
+#    - Analysten-Signal (Buy/Hold/Sell) als Zusatz-Filter/Kategorie
+#    - Megatrend vs Defensiv (Heuristik aus Sektor/Industry + Beta/Dividende)
 # =========================================================
 
-# Ampel -> Punkte in Prozent: Grün=100%, Gelb=50%, Rot=0%, Unklar=50%
-AMP_TO_PCT = {"🟢": 1.0, "🟡": 0.5, "🔴": 0.0, "⚪": 0.5}
+# Verschärft: Gelb/Unklar zählen weniger als vorher
+AMP_TO_PCT = {"🟢": 1.00, "🟡": 0.30, "🔴": 0.00, "⚪": 0.30}
 
-# Basisschwellen (branchenneutral) – “Profi entschärft”
+# Basisschwellen (branchenneutral) – “entschärft” bei KGV/Schulden, aber Score ist härter
 THRESHOLDS_DEFAULT = {
-    "pe": (30, 60),           # Grün <= 30, Gelb <= 60, sonst Rot
-    "de": (1.5, 3.0),         # Debt/Equity: Grün <= 1.5, Gelb <= 3.0, sonst Rot
-    "growth": (15, 5),        # Wachstum: Grün >= 15, Gelb >= 5, sonst Rot
-    "margin": (15, 8),        # Operative Marge: Grün >= 15, Gelb >= 8, sonst Rot
-    "fcf": (10, 3),           # FCF-Marge: Grün >= 10, Gelb >= 3, sonst Rot
+    "pe": (30, 60),           # Grün <= 30, Gelb <= 60
+    "de": (1.5, 3.0),         # Grün <= 1.5, Gelb <= 3.0
+    "growth": (15, 5),        # Grün >= 15, Gelb >= 5
+    "margin": (15, 8),        # Grün >= 15, Gelb >= 8
+    "fcf": (10, 3),           # Grün >= 10, Gelb >= 3
 }
 
-# Branchen-Profile (Gewichte müssen 100 ergeben)
 PROFILE_RULES = {
     "Tech/Software": {
         "weights": {"growth": 30, "margin": 25, "fcf": 25, "de": 10, "pe": 10},
-        "thresholds": {"pe": (40, 80), "de": (2.0, 4.0)}  # Tech darf teurer sein, Schulden etwas toleranter
+        "thresholds": {"pe": (40, 80), "de": (2.0, 4.0)}
     },
     "Industrie/Zyklisch": {
         "weights": {"growth": 25, "margin": 20, "fcf": 20, "de": 20, "pe": 15},
@@ -77,9 +77,8 @@ PROFILE_RULES = {
         "thresholds": {"pe": (35, 70), "de": (2.0, 4.0)}
     },
     "Finanzen/Banken": {
-        # Debt/Equity ist bei Banken nicht sinnvoll -> Gewicht 0 (neutral)
         "weights": {"growth": 25, "margin": 35, "fcf": 20, "de": 0, "pe": 20},
-        "thresholds": {"pe": (25, 45)}  # konservativer bei KGV
+        "thresholds": {"pe": (25, 45)}
     },
     "Default": {
         "weights": {"growth": 25, "margin": 20, "fcf": 20, "de": 20, "pe": 15},
@@ -87,29 +86,34 @@ PROFILE_RULES = {
     }
 }
 
-FINANCE_SECTORS = {"Financial Services", "Financial", "Banks", "Insurance"}
-TECH_SECTORS = {"Technology", "Information Technology", "Communication Services"}
-INDUSTRIAL_SECTORS = {"Industrials", "Basic Materials", "Energy", "Utilities"}
-CONSUMER_SECTORS = {"Consumer Defensive", "Consumer Cyclical"}
+FINANCE_HINTS = ("Bank", "Insurance", "Financial", "Credit", "Capital Markets")
+MEGATREND_HINTS = (
+    "Semiconductor", "AI", "Artificial", "Cloud", "Cyber", "Security", "Robotics",
+    "Automation", "Electric", "EV", "Battery", "Renewable", "Solar", "Wind",
+    "Biotech", "Genomic", "CRISPR", "Health Tech", "Data", "Software", "Platform"
+)
+
+# Entscheidungsschwellen (verschärft)
+# Kaufen erst ab 75, Beobachten ab 62
+BUY_SCORE = 75.0
+WATCH_SCORE = 62.0
 
 # Red Flags:
-# 1) FCF-Marge < 0  -> max Entscheidung = Beobachten (Score gedeckelt < 70)
-# 2) Operative Marge < 5 -> max Beobachten
-# 3) Debt/Equity > 3.0 UND FCF-Marge < 5 -> Score halbieren
-def apply_red_flags(score_0_100: float, oper_margin_pct, fcf_margin_pct, debt_to_equity, profile_name: str) -> tuple[float, list]:
+# - FCF negativ -> maximal Beobachten
+# - Operative Marge < 5 -> maximal Beobachten
+# - Debt/Equity > 3 UND FCF < 5 -> Score halbieren
+def apply_red_flags(score_0_100: float, oper_margin_pct, fcf_margin_pct, debt_to_equity, profile_name: str):
     flags = []
     score = score_0_100
-
-    # Banken: Debt/Equity ignorieren wir bei Flags (weil interpretativ schwierig)
     ignore_de = (profile_name == "Finanzen/Banken")
 
     if fcf_margin_pct is not None and fcf_margin_pct < 0:
-        flags.append("Red Flag: Free Cashflow negativ (Geldverbrennung) → max. BEOBACHTEN")
-        score = min(score, 69.9)
+        flags.append("Red Flag: Free Cashflow negativ → max. BEOBACHTEN")
+        score = min(score, BUY_SCORE - 0.1)
 
     if oper_margin_pct is not None and oper_margin_pct < 5:
         flags.append("Red Flag: Operative Marge < 5% → max. BEOBACHTEN")
-        score = min(score, 69.9)
+        score = min(score, BUY_SCORE - 0.1)
 
     if (not ignore_de) and debt_to_equity is not None and fcf_margin_pct is not None:
         if debt_to_equity > 3.0 and fcf_margin_pct < 5:
@@ -118,13 +122,76 @@ def apply_red_flags(score_0_100: float, oper_margin_pct, fcf_margin_pct, debt_to
 
     return score, flags
 
-def decision_from_score(score_0_100: float) -> str:
-    # Entschärft wie du wolltest: 70/100 (=7/10) ist KAUFEN
-    if score_0_100 >= 70:
+def base_decision(score_0_100: float) -> str:
+    if score_0_100 >= BUY_SCORE:
         return "🟢 KAUFEN"
-    if score_0_100 >= 55:
+    if score_0_100 >= WATCH_SCORE:
         return "🟡 BEOBACHTEN"
     return "🔴 NICHT KAUFEN"
+
+def classify_style(sector: str | None, industry: str | None, beta: float | None, dividend_yield_pct: float | None):
+    s = (sector or "").lower()
+    i = (industry or "").lower()
+
+    # Megatrends: Heuristik über Sector/Industry Keywords
+    if any(h.lower() in i for h in MEGATREND_HINTS) or any(h.lower() in s for h in ("technology", "communication")):
+        return "Megatrend"
+
+    # Defensiv: Consumer Defensive / Utilities / Healthcare + niedrige Beta oder höhere Dividende
+    defensive_sector = any(x in s for x in ("consumer defensive", "utilities", "healthcare"))
+    low_beta = (beta is not None and beta <= 1.0)
+    decent_div = (dividend_yield_pct is not None and dividend_yield_pct >= 2.5)
+
+    if defensive_sector and (low_beta or decent_div):
+        return "Defensiv"
+
+    # Default
+    return "Core"
+
+def analyst_signal(rec_key: str | None, rec_mean: float | None):
+    # yfinance: recommendationKey (e.g. "buy", "strong_buy", "hold")
+    # recommendationMean oft 1.0 (stark kauf) bis 5.0 (stark verkauf)
+    key = (rec_key or "").lower().strip()
+    if key in ("strong_buy", "buy"):
+        return "🟢 Analysten: Kauf"
+    if key in ("hold", "neutral"):
+        return "🟡 Analysten: Neutral"
+    if key in ("sell", "strong_sell", "underperform", "underweight"):
+        return "🔴 Analysten: Verkauf"
+
+    if rec_mean is not None:
+        if rec_mean <= 2.0:
+            return "🟢 Analysten: Kauf"
+        if rec_mean <= 3.0:
+            return "🟡 Analysten: Neutral"
+        return "🔴 Analysten: Verkauf"
+
+    return "⚪ Analysten: Unklar"
+
+def final_bucket(decision: str, style: str, analyst_sig: str):
+    # Du wolltest:
+    # - "was gerade gefragt / Megatrends" -> Megatrend kaufen
+    # - "defensiv ohne viel Renditechancen" -> defensiv kaufen
+    # - "laut Analysten gehört zu den Kauf Aktien" -> Analysten-Kauf
+    # Wir geben eine klare Kategorie aus.
+
+    if decision.startswith("🟢"):
+        if analyst_sig.startswith("🟢"):
+            return "🟢 Kauf-Aktie (Analysten)"
+        if style == "Megatrend":
+            return "🚀 Kauf-Aktie (Megatrend)"
+        if style == "Defensiv":
+            return "🛡️ Defensiv kaufen"
+        return "🟢 Kaufen (Core)"
+
+    if decision.startswith("🟡"):
+        if style == "Megatrend":
+            return "🚀 Beobachten (Megatrend)"
+        if style == "Defensiv":
+            return "🛡️ Beobachten (Defensiv)"
+        return "🟡 Beobachten"
+
+    return "🔴 Nicht kaufen"
 
 # =========================================================
 # 3) Helper
@@ -157,7 +224,6 @@ def norm_ticker(t: str) -> str:
 # =========================================================
 @st.cache_data(ttl=60 * 30)
 def fx_rate_to_eur(from_ccy: str) -> float | None:
-    """Faktor: amount_in_from_ccy * rate = amount_in_eur"""
     from_ccy = (from_ccy or "").upper()
     if from_ccy in ["EUR", ""]:
         return 1.0
@@ -194,28 +260,19 @@ def detect_profile(sector: str | None, industry: str | None) -> str:
     s = (sector or "").strip()
     i = (industry or "").strip()
 
-    # Finanzwerte
-    if s in FINANCE_SECTORS or "Bank" in i or "Insurance" in i or "Financial" in i:
+    if any(h.lower() in i.lower() for h in FINANCE_HINTS) or any(h.lower() in s.lower() for h in ("financial", "banks", "insurance")):
         return "Finanzen/Banken"
-
-    # Tech/Software
-    if s in TECH_SECTORS or "Software" in i or "Semiconductor" in i or "Internet" in i:
+    if any(h.lower() in i.lower() for h in ("software", "semiconductor", "internet", "data", "cyber")) or "technology" in s.lower():
         return "Tech/Software"
-
-    # Konsum/Marke
-    if s in CONSUMER_SECTORS or "Retail" in i or "Beverage" in i or "Food" in i:
+    if any(h.lower() in i.lower() for h in ("retail", "food", "beverage", "household", "consumer")) or "consumer" in s.lower():
         return "Konsum/Marke"
-
-    # Industrie/Zyklisch
-    if s in INDUSTRIAL_SECTORS or "Industrial" in i or "Aerospace" in i or "Defense" in i:
+    if any(h.lower() in i.lower() for h in ("industrial", "aerospace", "defense", "machinery", "automation")) or any(x in s.lower() for x in ("industrials", "energy", "utilities", "basic materials")):
         return "Industrie/Zyklisch"
-
     return "Default"
 
 def get_thresholds_for_profile(profile_name: str) -> dict:
     base = dict(THRESHOLDS_DEFAULT)
     override = PROFILE_RULES.get(profile_name, PROFILE_RULES["Default"]).get("thresholds", {})
-    # override merges only provided keys
     for k, v in override.items():
         base[k] = v
     return base
@@ -257,7 +314,6 @@ def ampel_margin(oper_margin_pct: float | None, thresholds: dict) -> str:
     return "🔴 Rot"
 
 def ampel_de(debt_to_equity: float | None, thresholds: dict, profile_name: str) -> str:
-    # Banken: Debt/Equity ist nicht sinnvoll -> neutral
     if profile_name == "Finanzen/Banken":
         return "⚪ Unklar"
     if debt_to_equity is None or debt_to_equity < 0:
@@ -289,7 +345,6 @@ def amp_to_pct(ampel_text: str) -> float:
     return AMP_TO_PCT["⚪"]
 
 def weighted_score_0_100(ampels: dict, weights: dict) -> float:
-    # Sum(weight * pct) with weights summing to 100 (or close)
     total_weight = sum(weights.values()) if weights else 100
     if total_weight <= 0:
         return 0.0
@@ -297,7 +352,6 @@ def weighted_score_0_100(ampels: dict, weights: dict) -> float:
     for key, w in weights.items():
         pct = amp_to_pct(ampels.get(key, "⚪ Unklar"))
         s += w * pct
-    # Normalize to 0..100 even if weights don't sum exactly 100
     return (s / total_weight) * 100.0
 
 # =========================================================
@@ -330,6 +384,13 @@ def fetch_yfinance_raw(ticker: str) -> dict:
     sector = safe_get(info, "sector")
     industry = safe_get(info, "industry")
 
+    beta = to_float(safe_get(info, "beta"))
+    div_yield = safe_get(info, "dividendYield")
+    dividend_yield_pct = to_pct(div_yield)  # 0.02 -> 2%
+
+    rec_key = safe_get(info, "recommendationKey")
+    rec_mean = to_float(safe_get(info, "recommendationMean"))
+
     return {
         "Ticker": ticker.upper(),
         "Name": name,
@@ -338,11 +399,16 @@ def fetch_yfinance_raw(ticker: str) -> dict:
         "Industrie": industry,
         "Währung": ccy if ccy else "Unbekannt",
         "Kurs": price,
+        "Kurs (€)": None,
         "KGV": pe,
         "Umsatzwachstum YoY (%)": rev_growth,
         "Operative Marge (%)": oper_margin,
         "Debt/Equity": debt_to_equity,
         "FCF-Marge (%)": fcf_margin,
+        "Beta": beta,
+        "Dividendenrendite (%)": dividend_yield_pct,
+        "Analysten Key": rec_key,
+        "Analysten Mean": rec_mean,
     }
 
 # =========================================================
@@ -363,12 +429,11 @@ EXCH_TO_SUFFIX = {
 }
 
 @st.cache_data(ttl=60 * 60)
-def resolve_via_openfigi(input_code: str) -> dict | None:
+def resolve_via_openfigi(input_code: str):
     code = norm_ticker(input_code)
     if not code:
         return None
 
-    id_type = None
     if ISIN_RE.match(code):
         id_type = "ID_ISIN"
     elif WKN_RE.match(code):
@@ -389,14 +454,13 @@ def resolve_via_openfigi(input_code: str) -> dict | None:
         ticker = (hit.get("ticker") or "").upper().strip()
         name = (hit.get("name") or "").strip()
         exch = (hit.get("exchCode") or "").upper().strip()
-
         if not ticker:
             return None
 
         suffix = EXCH_TO_SUFFIX.get(exch, "")
         yahoo_ticker = ticker + suffix if suffix and "." not in ticker else ticker
-
         isin = hit.get("securityIdentifier")
+
         return {"ticker": yahoo_ticker, "name": name or yahoo_ticker, "isin": isin, "exch": exch}
     except Exception:
         return None
@@ -410,7 +474,7 @@ def classify_input(user_input: str) -> str:
     return "TICKER"
 
 # =========================================================
-# 9) News (Google News RSS + Welt-Schlagzeilen)
+# 9) News (Google News RSS) – kompakt, dann aufklappbar
 # =========================================================
 @st.cache_data(ttl=10 * 60)
 def google_news_rss(query: str, max_items: int = 6):
@@ -431,7 +495,10 @@ def google_news_rss(query: str, max_items: int = 6):
 # 10) UI State
 # =========================================================
 if "extra_watchlist" not in st.session_state:
-    st.session_state["extra_watchlist"] = []  # nur Sitzung
+    st.session_state["extra_watchlist"] = []
+
+if "last_df" not in st.session_state:
+    st.session_state["last_df"] = None
 
 def combined_watchlist_rows():
     combined = {norm_ticker(x["ticker"]): {"Ticker": norm_ticker(x["ticker"]), "Name": x["name"], "ISIN": ""} for x in MASTER_WATCHLIST}
@@ -447,11 +514,12 @@ def combined_watchlist_rows():
 # 11) Layout
 # =========================================================
 st.title("📈 Aktienbewertung – Profi-Score (0–100)")
-st.caption("Profisystem: gewichtete Kennzahlen + Red Flags + Branchenprofile. Kein Fair Value / keine Kursziele.")
+st.caption("Verschärftes Scoring + Red Flags + Branchenprofile + Kategorien (Megatrend / Defensiv / Analysten-Kauf).")
 
 with st.sidebar:
     st.header("📌 Watchlist")
-    st.caption("Hauptliste ist fix sichtbar. Eigene Adds sind nur für diese Sitzung (Tab) und gehen beim Schließen verloren.")
+    st.caption("Hauptliste fix. Eigene Adds nur für diese Sitzung (Tab).")
+
     st.dataframe(pd.DataFrame(combined_watchlist_rows()), use_container_width=True, height=260)
 
     st.subheader("➕ Hinzufügen (Ticker / WKN / ISIN)")
@@ -484,7 +552,6 @@ with st.sidebar:
                 if tkr in existing:
                     st.info("Dieser Ticker ist schon in der Liste.")
                 else:
-                    # Name/ISIN best effort via yfinance
                     try:
                         info = yf.Ticker(tkr).get_info() or {}
                         nm = info.get("shortName") or info.get("longName") or tkr
@@ -517,13 +584,12 @@ with st.sidebar:
 
     st.divider()
     auto_fetch = st.checkbox("Beim Laden automatisch abrufen", value=True)
-    st.caption("Kurse/Kennzahlen: yfinance. News: Google News RSS. (Für ISIN/WKN braucht's requests.)")
 
 colA, colB, colC = st.columns([1, 1, 2])
 with colA:
     fetch_now = st.button("🔄 Kurse & Bewertung aktualisieren", type="primary")
 with colB:
-    news_now = st.button("📰 News aktualisieren")
+    news_now = st.button("📰 News anzeigen/aktualisieren")
 with colC:
     st.write("")
 
@@ -536,11 +602,9 @@ tickers = [r["Ticker"] for r in tickers_rows]
 should_run = fetch_now or (auto_fetch and not st.session_state.has_run)
 
 # =========================================================
-# 12) Daten laden + Profi-Score berechnen
+# 12) Daten laden + Score berechnen
 # =========================================================
-if should_run:
-    st.session_state.has_run = True
-
+def build_dataframe():
     rows = []
     errors = []
 
@@ -553,23 +617,16 @@ if should_run:
             thresholds = get_thresholds_for_profile(profile)
             weights = get_weights_for_profile(profile)
 
-            # Ampeln (ohne Fair Value)
+            # Einzelampeln
             a_pe = ampel_pe(data.get("KGV"), thresholds)
             a_growth = ampel_growth(data.get("Umsatzwachstum YoY (%)"), thresholds)
             a_margin = ampel_margin(data.get("Operative Marge (%)"), thresholds)
             a_de = ampel_de(data.get("Debt/Equity"), thresholds, profile)
             a_fcf = ampel_fcf(data.get("FCF-Marge (%)"), thresholds)
 
-            # Für Score nutzen wir Keys: growth, margin, fcf, de, pe
-            ampels = {
-                "pe": a_pe,
-                "growth": a_growth,
-                "margin": a_margin,
-                "de": a_de,
-                "fcf": a_fcf,
-            }
-
+            ampels = {"pe": a_pe, "growth": a_growth, "margin": a_margin, "de": a_de, "fcf": a_fcf}
             base_score = weighted_score_0_100(ampels, weights)
+
             final_score, red_flags = apply_red_flags(
                 base_score,
                 data.get("Operative Marge (%)"),
@@ -578,11 +635,26 @@ if should_run:
                 profile
             )
 
-            data["Profil"] = profile
-            data["Score (0–100)"] = round(final_score, 1)
-            data["Entscheidung"] = decision_from_score(final_score)
+            decision = base_decision(final_score)
 
-            # Ampeln als eigene Spalten
+            style = classify_style(
+                data.get("Sektor"),
+                data.get("Industrie"),
+                data.get("Beta"),
+                data.get("Dividendenrendite (%)")
+            )
+
+            analyst_sig = analyst_signal(data.get("Analysten Key"), data.get("Analysten Mean"))
+            bucket = final_bucket(decision, style, analyst_sig)
+
+            data["Profil"] = profile
+            data["Stil"] = style
+            data["Analysten-Signal"] = analyst_sig
+            data["Kategorie"] = bucket
+
+            data["Score (0–100)"] = round(final_score, 1)
+            data["Entscheidung"] = decision
+
             data["Ampel KGV"] = a_pe
             data["Ampel Wachstum"] = a_growth
             data["Ampel Marge"] = a_margin
@@ -596,65 +668,81 @@ if should_run:
             errors.append((tk.upper(), str(e)))
 
     df = pd.DataFrame(rows)
-
     if not df.empty:
-        # Sortierung nach Score
         df = df.sort_values(by="Score (0–100)", ascending=False).reset_index(drop=True)
+    return df, errors
 
-        st.subheader("Ergebnis")
-        st.caption(f"Zuletzt aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
+if should_run:
+    st.session_state.has_run = True
+    df, errors = build_dataframe()
+    st.session_state["last_df"] = df
 
-        # Top 10 Ranking
-        st.markdown("### 🏆 Top 10 (Ranking nach Score)")
-        top10_cols = ["Score (0–100)", "Entscheidung", "Ticker", "Name", "Profil", "Kurs (€)", "KGV"]
-        top10_cols = [c for c in top10_cols if c in df.columns]
-        st.dataframe(df[top10_cols].head(10), use_container_width=True)
+    st.caption(f"Zuletzt aktualisiert: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
 
-        # Hauptansicht (übersichtlich)
-        st.markdown("### 📋 Gesamtliste (Kurzansicht)")
-        cols_main = [
-            "Score (0–100)",
-            "Entscheidung",
-            "Ticker",
-            "Name",
-            "Profil",
-            "Währung",
-            "Kurs (€)",
-            "KGV",
-            "Umsatzwachstum YoY (%)",
+    if df is not None and not df.empty:
+        # TOP 10 immer sichtbar
+        st.markdown("## 🏆 Top 10 (immer sichtbar)")
+        top_cols = [
+            "Score (0–100)", "Kategorie", "Entscheidung", "Ticker", "Name", "Profil", "Stil",
+            "Kurs (€)", "KGV", "Umsatzwachstum YoY (%)"
         ]
-        cols_main = [c for c in cols_main if c in df.columns]
-        st.dataframe(df[cols_main], use_container_width=True)
+        top_cols = [c for c in top_cols if c in df.columns]
+        st.dataframe(df[top_cols].head(10), use_container_width=True)
 
-        # Details + Einzelampeln + Red Flags
-        st.markdown("### 🔎 Details (Kennzahlen, Ampeln, Red Flags)")
-        cols_details = [
-            "Ticker",
-            "Sektor",
-            "Industrie",
-            "Operative Marge (%)",
-            "FCF-Marge (%)",
-            "Debt/Equity",
-            "Ampel KGV",
-            "Ampel Wachstum",
-            "Ampel Marge",
-            "Ampel Verschuldung",
-            "Ampel Free Cashflow",
-            "Red Flags",
-        ]
-        cols_details = [c for c in cols_details if c in df.columns]
-        with st.expander("Details anzeigen"):
-            st.dataframe(df[cols_details], use_container_width=True)
+        # Auswahl: andere Werte nur bei Auswahl anzeigen (mehrfach möglich)
+        st.markdown("## 📌 Details anzeigen (auswählen)")
+        remaining = df.iloc[10:].copy()
+        options = []
+        if not remaining.empty:
+            for _, r in remaining.iterrows():
+                options.append(f"{r['Ticker']} — {r.get('Name','')}")
+        selected = st.multiselect(
+            "Wähle Aktien aus der Watchlist (mehrfach möglich):",
+            options=options,
+            default=[]
+        )
 
+        # Ausgewählte Details anzeigen
+        if selected:
+            st.markdown("### 🔎 Ausgewählte Aktien – Kurz zuerst, dann aufklappen")
+            # Map from label to ticker
+            label_to_ticker = {f"{r['Ticker']} — {r.get('Name','')}": r["Ticker"] for _, r in remaining.iterrows()}
+            selected_tickers = [label_to_ticker[x] for x in selected if x in label_to_ticker]
+
+            for tkr in selected_tickers:
+                row = df[df["Ticker"] == tkr].iloc[0].to_dict()
+
+                # “klein” (Kurzkarte)
+                st.markdown(
+                    f"**{row.get('Ticker','')} – {row.get('Name','')}**  \n"
+                    f"**Score:** {row.get('Score (0–100)','')} | **Kategorie:** {row.get('Kategorie','')} | **Entscheidung:** {row.get('Entscheidung','')}"
+                )
+                st.caption(
+                    f"Profil: {row.get('Profil','')} | Stil: {row.get('Stil','')} | Analysten: {row.get('Analysten-Signal','')}"
+                )
+
+                # Aufklappbar (größer)
+                with st.expander("Details öffnen"):
+                    detail_cols = [
+                        "Kurs (€)", "Währung", "KGV", "Dividendenrendite (%)", "Beta",
+                        "Umsatzwachstum YoY (%)", "Operative Marge (%)", "FCF-Marge (%)", "Debt/Equity",
+                        "Ampel KGV", "Ampel Wachstum", "Ampel Marge", "Ampel Free Cashflow", "Ampel Verschuldung",
+                        "Red Flags", "Sektor", "Industrie", "ISIN"
+                    ]
+                    show = {k: row.get(k) for k in detail_cols if k in row}
+                    st.dataframe(pd.DataFrame([show]), use_container_width=True)
+
+        # Download
         st.download_button(
-            "⬇️ Ergebnis als CSV herunterladen",
+            "⬇️ Gesamtergebnis als CSV herunterladen",
             data=df.to_csv(index=False).encode("utf-8"),
             file_name="aktien_profi_score.csv",
             mime="text/csv",
         )
 
         st.caption(
-            "Entscheidung: 🟢 Kaufen ab 70/100 | 🟡 Beobachten 55–69 | 🔴 Nicht kaufen < 55. "
+            f"Score-System (verschärft): Gelb/Unklar zählen nur 30%. "
+            f"Kaufen ab {BUY_SCORE}/100, Beobachten ab {WATCH_SCORE}/100. "
             "Red Flags können Kaufen verhindern oder Score reduzieren."
         )
 
@@ -667,42 +755,65 @@ else:
     st.info("Klicke auf **„Kurse & Bewertung aktualisieren“** oder aktiviere **„Beim Laden automatisch abrufen“**.")
 
 # =========================================================
-# 13) News (Button)
+# 13) News – erst klein, dann groß öffnen
+#    - Top10: kleine Übersicht
+#    - Details/Mehr: per Expander
 # =========================================================
 if news_now:
-    st.subheader("📰 News zu deinen Aktien")
-    st.caption("Headlines via Google News RSS (de/AT).")
+    df = st.session_state.get("last_df")
+    if df is None or df.empty:
+        st.warning("Bitte zuerst **Kurse & Bewertung aktualisieren**, damit Ticker/Namen sauber vorhanden sind.")
+    else:
+        st.markdown("## 📰 News (kompakt → aufklappbar)")
+        st.caption("Quelle: Google News RSS (de/AT).")
 
-    for row in tickers_rows[:25]:
-        t = row["Ticker"]
-        n = row.get("Name") or t
-        q = f"{t} {n} Aktie OR stock"
-        try:
-            items = google_news_rss(q, max_items=5)
-        except Exception:
-            items = []
+        top10 = df.head(10).copy()
 
-        with st.expander(f"{t} – {n}", expanded=False):
+        st.markdown("### 🔥 Top 10 – schnelle Headlines (kompakt)")
+        for _, r in top10.iterrows():
+            t = r["Ticker"]
+            n = r.get("Name", t)
+            q = f"{t} {n} Aktie OR stock"
+            try:
+                items = google_news_rss(q, max_items=3)  # kompakt
+            except Exception:
+                items = []
+
+            st.markdown(f"**{t} – {n}**")
             if not items:
-                st.write("Keine Headlines gefunden oder Feed gerade nicht erreichbar.")
+                st.write("Keine Headlines gefunden.")
             else:
                 for it in items:
+                    st.markdown(f"- [{it['title']}]({it['link']})")
+            with st.expander("Mehr anzeigen"):
+                try:
+                    more = google_news_rss(q, max_items=10)
+                except Exception:
+                    more = []
+                for it in more:
                     st.markdown(f"- [{it['title']}]({it['link']})  \n  _{it['pub']}_")
 
-    st.divider()
-    st.subheader("🌍 Welt-Schlagzeilen (Finanzen)")
-    world_q = "stock market OR Börse OR inflation OR earnings OR Zentralbank"
-    world_items = google_news_rss(world_q, max_items=10)
-    for it in world_items:
-        st.markdown(f"- [{it['title']}]({it['link']})  \n  _{it['pub']}_")
+        st.divider()
+        st.markdown("### 🌍 Welt-Schlagzeilen (Finanzen)")
+        world_q = "stock market OR Börse OR inflation OR earnings OR Zentralbank"
         try:
-            st.toast(it["title"])
+            world_items = google_news_rss(world_q, max_items=6)  # klein
         except Exception:
-            pass
+            world_items = []
+
+        if world_items:
+            for it in world_items:
+                st.markdown(f"- [{it['title']}]({it['link']})")
+        with st.expander("Mehr Welt-News öffnen"):
+            try:
+                world_more = google_news_rss(world_q, max_items=15)
+            except Exception:
+                world_more = []
+            for it in world_more:
+                st.markdown(f"- [{it['title']}]({it['link']})  \n  _{it['pub']}_")
 
 # =========================================================
-# Hinweis:
-# In requirements.txt muss mindestens stehen:
+# Hinweis: requirements.txt
 # streamlit
 # pandas
 # yfinance
