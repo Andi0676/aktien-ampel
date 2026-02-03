@@ -36,12 +36,10 @@ st.markdown(
     .stDataFrame { border-radius: 12px; }
     .stExpander { border-radius: 12px; }
     .stButton > button { border-radius: 12px; }
-    .small-muted { opacity: .75; font-size: .9rem; }
 </style>
 """,
     unsafe_allow_html=True,
 )
-
 
 # ============================================================
 # Helpers
@@ -67,27 +65,6 @@ def safe_get(d: dict, key: str):
     if val in [None, "None", "nan"]:
         return None
     return val
-
-
-def fmt_eur(x):
-    v = to_float(x)
-    if v is None:
-        return "—"
-    return f"{v:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def fmt_num(x, d=2):
-    v = to_float(x)
-    if v is None:
-        return "—"
-    return f"{v:.{d}f}"
-
-
-def fmt_pct(x, d=1):
-    v = to_float(x)
-    if v is None:
-        return "—"
-    return f"{v:.{d}f}%"
 
 
 @st.cache_data(ttl=60 * 30)
@@ -130,8 +107,19 @@ def normalize_token(s: str) -> str:
     return (s or "").strip().upper()
 
 
+def human_dt(ts: int | float | None) -> str:
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromtimestamp(float(ts), tz=timezone.utc).astimezone()
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return ""
+
+
 # ============================================================
 # Deine feste Watchlist (ohne ETFs) + Mapping für WKN/ISIN
+# (WKN/ISIN hier nur dort, wo du sie sicher kennst – sonst leer lassen)
 # ============================================================
 DEFAULT_WATCHLIST = [
     # Big Tech / Megatrend
@@ -143,7 +131,7 @@ DEFAULT_WATCHLIST = [
     {"Ticker": "NFLX",  "Name": "Netflix", "WKN": "", "ISIN": ""},
     {"Ticker": "SHOP",  "Name": "Shopify", "WKN": "", "ISIN": ""},
 
-    # DACH/CH
+    # DACH/CH (Beispiele – Yahoo Ticker abhängig von Börse)
     {"Ticker": "SAP.DE",  "Name": "SAP SE", "WKN": "", "ISIN": ""},
     {"Ticker": "ROG.SW",  "Name": "Roche Holding", "WKN": "", "ISIN": ""},
     {"Ticker": "NOVN.SW", "Name": "Novartis", "WKN": "", "ISIN": ""},
@@ -175,11 +163,11 @@ DEFAULT_WATCHLIST = [
     # ABB (je nach Börse: ABB oder ABBN.SW)
     {"Ticker": "ABB",   "Name": "ABB", "WKN": "", "ISIN": ""},
 
-    # Trust (optional)
+    # Trust (optional, ist kein ETF; wenn du ihn nicht willst, einfach aus DEFAULT_WATCHLIST löschen)
     {"Ticker": "SMT.L", "Name": "Scottish Mortgage Investment Trust", "WKN": "", "ISIN": ""},
 ]
 
-
+# Indexe für WKN/ISIN Auflösung (nur aus DEFAULT + global hinzugefügt)
 def build_lookup_index(rows: list[dict]) -> tuple[dict, dict, dict]:
     by_ticker = {}
     by_wkn = {}
@@ -198,11 +186,13 @@ def build_lookup_index(rows: list[dict]) -> tuple[dict, dict, dict]:
 
 
 # ============================================================
-# Shared “global” additions (ohne DB)
+# Shared “global” additions (ohne DB, reset möglich)
+# - Alle sehen diese Liste, solange die App läuft.
+# - User kann nur “seine” Additions löschen (per session_id).
 # ============================================================
 @st.cache_resource
 def global_store():
-    return {"added": []}  # list of dicts
+    return {"added": []}  # list of dicts: {"Ticker","Name","WKN","ISIN","added_by","added_at"}
 
 
 def get_session_id() -> str:
@@ -215,19 +205,23 @@ def current_watchlist() -> list[dict]:
     base = DEFAULT_WATCHLIST.copy()
     base_tickers = {normalize_token(x["Ticker"]) for x in base}
     added = global_store()["added"]
+    # füge nur hinzu, wenn nicht doppelt
     for a in added:
         if normalize_token(a.get("Ticker")) not in base_tickers:
             base.append({k: a.get(k, "") for k in ["Ticker", "Name", "WKN", "ISIN"]})
+    # sauber sortiert
     base = sorted(base, key=lambda r: (normalize_token(r.get("Ticker")), normalize_token(r.get("Name"))))
     return base
 
 
 # ============================================================
-# Scoring (ohne Fair Value) – 7/10 = Kaufen
+# Scoring (ohne Fair Value) – “Profi-näher”, aber nicht konservativ
+# Ziel: 7/10 = noch KAUFEN
 # ============================================================
 def score_kgv(pe: float | None) -> tuple[int, str]:
     if pe is None or pe <= 0:
         return 5, "KGV unbekannt → neutral"
+    # entschärft (nicht super-konservativ)
     if pe <= 25:
         return 10, "KGV günstig (≤25)"
     if pe <= 35:
@@ -290,6 +284,7 @@ def score_fcf(fcf_margin_pct: float | None) -> tuple[int, str]:
 
 
 def score_analyst(upside_pct: float | None, target_eur: float | None) -> tuple[int, str]:
+    # Erwartung in € (Analyst Target) ist wichtiger als “Red Flags”
     if target_eur is None:
         return 5, "Erwartung (Analysten-Ziel) fehlt → neutral"
     if upside_pct is None:
@@ -306,6 +301,7 @@ def score_analyst(upside_pct: float | None, target_eur: float | None) -> tuple[i
 
 
 def points_to_ampel(score_0_10: float) -> str:
+    # 7/10 soll noch KAUFEN sein
     if score_0_10 >= 7.0:
         return "🟢 Grün"
     if score_0_10 >= 5.5:
@@ -337,6 +333,7 @@ def trend_profil(sector: str | None, rev_growth_pct: float | None, beta: float |
     is_mega = any(k in s for k in megatrend_sectors) and (rev_growth_pct is not None and rev_growth_pct >= 10)
     is_def = any(k in s for k in defensiv_sectors) and ((beta is None) or (beta <= 1.15))
 
+    # Dividende als Hinweis für defensiv
     if is_def and dividend_yield_pct and dividend_yield_pct >= 1.5:
         return "🛡️ Defensiv"
     if is_mega:
@@ -347,43 +344,17 @@ def trend_profil(sector: str | None, rev_growth_pct: float | None, beta: float |
 
 
 # ============================================================
-# Rate-limit Fix: Cooldown + sanfter Retry
+# Data fetch (yfinance) – plus EUR + Erwartungen
 # ============================================================
-COOLDOWN_SECONDS = 45
-
-def can_run_now() -> bool:
-    last = st.session_state.get("last_run_epoch")
-    if last is None:
-        return True
-    return (time.time() - last) >= COOLDOWN_SECONDS
-
-
-def cooldown_left() -> int:
-    last = st.session_state.get("last_run_epoch")
-    if last is None:
-        return 0
-    left = int(COOLDOWN_SECONDS - (time.time() - last))
-    return max(0, left)
-
-
-def get_info_with_retry(ticker: str, retries: int = 2):
-    for i in range(retries + 1):
-        try:
-            return yf.Ticker(ticker).get_info() or {}
-        except Exception:
-            if i == retries:
-                return {}
-            time.sleep(1.0 + i * 2.0)
-
-
-@st.cache_data(ttl=60 * 30)  # länger cache => weniger Requests
-def fetch_stock_info_cached(ticker: str) -> dict:
-    info = get_info_with_retry(ticker, retries=2)
+@st.cache_data(ttl=60 * 15)
+def fetch_stock_info(ticker: str) -> dict:
+    t = yf.Ticker(ticker)
+    info = t.get_info() or {}
 
     price = to_float(safe_get(info, "currentPrice")) or to_float(safe_get(info, "regularMarketPrice"))
     pe = to_float(safe_get(info, "trailingPE")) or to_float(safe_get(info, "forwardPE"))
 
-    rev_growth = to_pct(safe_get(info, "revenueGrowth"))
+    rev_growth = to_pct(safe_get(info, "revenueGrowth"))  # 0.12 -> 12%
     oper_margin = to_pct(safe_get(info, "operatingMargins"))
 
     d2e_raw = to_float(safe_get(info, "debtToEquity"))
@@ -401,6 +372,7 @@ def fetch_stock_info_cached(ticker: str) -> dict:
         except Exception:
             pass
 
+    # Erwartung: Analyst target mean
     target_mean = to_float(safe_get(info, "targetMeanPrice"))
 
     name = safe_get(info, "shortName") or safe_get(info, "longName") or ticker.upper()
@@ -411,6 +383,7 @@ def fetch_stock_info_cached(ticker: str) -> dict:
     div_yield = safe_get(info, "dividendYield")
     div_yield_pct = to_pct(div_yield) if div_yield is not None else None
 
+    # EUR Werte
     price_eur = money_to_eur(price, ccy) if price is not None else None
     target_eur = money_to_eur(target_mean, ccy) if target_mean is not None else None
     upside_pct = None
@@ -452,6 +425,7 @@ def compute_score(row: dict) -> dict:
     s_fcf, r_fcf = score_fcf(to_float(fcfm))
     s_an, r_an = score_analyst(to_float(upside), to_float(target_eur))
 
+    # Gewichte (nicht zu konservativ)
     weights = {
         "KGV": 0.12,
         "Wachstum": 0.22,
@@ -470,12 +444,7 @@ def compute_score(row: dict) -> dict:
         s_an * weights["Erwartung"]
     )
 
-    profil = trend_profil(
-        row.get("Sektor"),
-        to_float(rev),
-        to_float(row.get("Beta")),
-        to_float(row.get("Dividendenrendite (%)")),
-    )
+    profil = trend_profil(row.get("Sektor"), to_float(rev), to_float(row.get("Beta")), to_float(row.get("Dividendenrendite (%)")))
 
     return {
         "Score (0–10)": round(score, 2),
@@ -487,78 +456,17 @@ def compute_score(row: dict) -> dict:
 
 
 # ============================================================
-# Positionsänderung (Δ Rang) + “Warum?”
-# ============================================================
-def delta_arrow(delta_rank: int | None) -> str:
-    if delta_rank is None:
-        return "⏺"
-    if delta_rank > 0:
-        return f"▲{int(delta_rank)}"
-    if delta_rank < 0:
-        return f"▼{abs(int(delta_rank))}"
-    return "—"
-
-
-def build_snapshot(df_sorted: pd.DataFrame) -> dict:
-    snap = {}
-    for i, r in df_sorted.reset_index(drop=True).iterrows():
-        tk = str(r.get("Ticker", "")).upper()
-        if not tk:
-            continue
-        snap[tk] = {
-            "Rang": int(i + 1),
-            "Score": to_float(r.get("Score (0–10)")),
-            "KGV": to_float(r.get("KGV")),
-            "Wachstum": to_float(r.get("Umsatzwachstum YoY (%)")),
-            "Marge": to_float(r.get("Operative Marge (%)")),
-            "FCF": to_float(r.get("FCF-Marge (%)")),
-            "DE": to_float(r.get("Debt/Equity")),
-            "Upside": to_float(r.get("Upside zum Ziel (%)")),
-        }
-    return snap
-
-
-def why_from_prev(curr: dict, prev: dict | None) -> list[str]:
-    if not prev:
-        return ["Neu oder zuvor nicht vorhanden → kein Vergleich möglich."]
-
-    def ch(label, c, p, unit=""):
-        c = to_float(c)
-        p = to_float(p)
-        if c is None or p is None:
-            return None
-        d = c - p
-        if abs(d) < 1e-9:
-            return None
-        sign = "↑" if d > 0 else "↓"
-        return (abs(d), f"{label}: {p:.2f}{unit} → {c:.2f}{unit} ({sign} {abs(d):.2f}{unit})")
-
-    changes = []
-    for item in [
-        ch("Score", curr.get("Score (0–10)"), prev.get("Score")),
-        ch("KGV", curr.get("KGV"), prev.get("KGV")),
-        ch("Wachstum", curr.get("Umsatzwachstum YoY (%)"), prev.get("Wachstum"), "%"),
-        ch("Marge", curr.get("Operative Marge (%)"), prev.get("Marge"), "%"),
-        ch("FCF-Marge", curr.get("FCF-Marge (%)"), prev.get("FCF"), "%"),
-        ch("Debt/Equity", curr.get("Debt/Equity"), prev.get("DE")),
-        ch("Upside", curr.get("Upside zum Ziel (%)"), prev.get("Upside"), "%"),
-    ]:
-        if item:
-            changes.append(item)
-
-    changes.sort(key=lambda x: x[0], reverse=True)
-    if not changes:
-        return ["Keine relevanten Änderungen in den Daten gefunden (oder Daten fehlen)."]
-    return [t for _, t in changes[:4]]
-
-
-# ============================================================
 # NEWS
+# - Weltweit: RSS (mehrere seriöse Quellen)
+# - Aktienbezogen: yfinance.news (falls vorhanden)
 # ============================================================
 GLOBAL_RSS_FEEDS = [
+    # Allgemein / Wirtschaft
     ("Reuters Business", "https://feeds.reuters.com/reuters/businessNews"),
     ("Reuters Markets", "https://feeds.reuters.com/news/markets"),
+    ("Financial Times", "https://www.ft.com/?format=rss"),
     ("MarketWatch Top", "https://feeds.marketwatch.com/marketwatch/topstories/"),
+    ("The Economist", "https://www.economist.com/the-world-this-week/rss.xml"),
 ]
 
 
@@ -570,6 +478,7 @@ def fetch_global_news(days_back: int = 60, max_items: int = 12) -> list[dict]:
         try:
             d = feedparser.parse(url)
             for e in d.entries[: max_items * 2]:
+                # published_parsed kann fehlen
                 published = None
                 if getattr(e, "published_parsed", None):
                     published = datetime.fromtimestamp(time.mktime(e.published_parsed), tz=timezone.utc)
@@ -583,10 +492,18 @@ def fetch_global_news(days_back: int = 60, max_items: int = 12) -> list[dict]:
                 link = getattr(e, "link", None)
                 if not title or not link:
                     continue
-                items.append({"Quelle": source_name, "Titel": title, "Link": link, "Zeit": published})
+                items.append(
+                    {
+                        "Quelle": source_name,
+                        "Titel": title,
+                        "Link": link,
+                        "Zeit": published,
+                    }
+                )
         except Exception:
             continue
 
+    # dedupe by link
     seen = set()
     out = []
     for it in sorted(items, key=lambda x: x["Zeit"] or datetime.now(timezone.utc), reverse=True):
@@ -620,7 +537,15 @@ def fetch_stock_news_yf(ticker: str, days_back: int = 60, max_items: int = 6) ->
                     dt = None
             if dt and dt < cutoff:
                 continue
-            items.append({"Titel": title, "Link": link, "Zeit": dt, "Quelle": n.get("publisher") or "Yahoo/Partner"})
+            items.append(
+                {
+                    "Titel": title,
+                    "Link": link,
+                    "Zeit": dt,
+                    "Quelle": n.get("publisher") or "Yahoo/Partner",
+                }
+            )
+        # sort + cap
         items = sorted(items, key=lambda x: x["Zeit"] or datetime.now(timezone.utc), reverse=True)[:max_items]
         return items
     except Exception:
@@ -631,25 +556,7 @@ def fetch_stock_news_yf(ticker: str, days_back: int = 60, max_items: int = 6) ->
 # UI – Header
 # ============================================================
 st.title("📌 Watchlist + Bewertung (Score) – clean für Handy")
-st.caption("Optik wie davor – plus **Pfeile für Positionsänderung**. Klick auf den Pfeil/Zeile → Details → „Warum?“.")
-
-
-# ============================================================
-# Session State
-# ============================================================
-if "last_df" not in st.session_state:
-    st.session_state.last_df = None
-if "last_run_at" not in st.session_state:
-    st.session_state.last_run_at = None
-if "last_errors" not in st.session_state:
-    st.session_state.last_errors = []
-if "prev_snapshot" not in st.session_state:
-    st.session_state.prev_snapshot = None  # ticker -> snapshot
-if "why_ticker" not in st.session_state:
-    st.session_state.why_ticker = None
-if "last_run_epoch" not in st.session_state:
-    st.session_state.last_run_epoch = None
-
+st.caption("Bewertung ohne Fair Value. 7/10 bleibt **KAUFEN**. KGV wird immer angezeigt. Erwartungen = Analysten-Ziel in €.")
 
 # ============================================================
 # Controls (oben kompakt)
@@ -661,56 +568,58 @@ by_ticker, by_wkn, by_isin = build_lookup_index(wl)
 with st.container():
     c1, c2 = st.columns([1.2, 1])
     with c1:
-        query = st.text_input("Suche (Ticker / Name / WKN / ISIN)", value="", placeholder="z.B. NVDA, SAP, DE000..., WKN ...")
+        query = st.text_input("Suche (Ticker / Name / WKN / ISIN)", value="", placeholder="z.B. NVDA, SAP, DE000..., 6-stellige WKN ...")
     with c2:
         colA, colB = st.columns(2)
         with colA:
-            disabled = not can_run_now()
-            label = "🔄 Aktualisieren" if not disabled else f"⏳ Bitte warten ({cooldown_left()}s)"
-            run_now = st.button(label, type="primary", use_container_width=True, disabled=disabled)
+            run_now = st.button("🔄 Aktualisieren", type="primary", use_container_width=True)
         with colB:
             show_global_news = st.toggle("🌍 Welt-News", value=True)
 
 st.divider()
 
-
 # ============================================================
-# Add / Remove – ohne DB
+# Add / Remove – ohne DB, shared solange App läuft
 # ============================================================
 with st.expander("➕ Aktie hinzufügen (alle sehen sie, solange die App läuft)", expanded=False):
-    add_in = st.text_input("Ticker oder WKN oder ISIN", value="", placeholder="z.B. KO oder DE000... oder WKN")
+    add_in = st.text_input("Ticker oder WKN oder ISIN", value="", placeholder="z.B. KO oder DE000... oder 6-stellige WKN")
     add_name = st.text_input("Optional: Name (wenn leer, wird automatisch geholt)", value="")
+
     add_btn = st.button("Hinzufügen", use_container_width=True)
 
     if add_btn:
         token = normalize_token(add_in)
         resolved_ticker = None
 
+        # 1) Ticker direkt?
         if token in by_ticker:
             resolved_ticker = token
+        # 2) ISIN / WKN in der bekannten Liste?
         elif is_isin(token) and token in by_isin:
             resolved_ticker = normalize_token(by_isin[token]["Ticker"])
         elif is_wkn(token) and token in by_wkn:
             resolved_ticker = normalize_token(by_wkn[token]["Ticker"])
         else:
+            # 3) Fallback: wir versuchen es als Ticker
             if re.fullmatch(r"[A-Z0-9\.\-]{1,15}", token):
                 resolved_ticker = token
 
         if not resolved_ticker:
-            st.error("Konnte das nicht auflösen. WKN/ISIN klappt nur, wenn in deiner Mapping-Liste hinterlegt – sonst Ticker eingeben.")
+            st.error("Konnte das nicht auflösen. Für WKN/ISIN klappt es nur, wenn es in der Watchlist-Mapping-Liste hinterlegt ist. Sonst bitte Ticker eingeben.")
         else:
+            # Name ggf. automatisch holen
             name_final = add_name.strip()
             if not name_final:
                 try:
-                    info = fetch_stock_info_cached(resolved_ticker)
+                    info = fetch_stock_info(resolved_ticker)
                     name_final = info.get("Name") or resolved_ticker
                 except Exception:
                     name_final = resolved_ticker
 
+            # in global store
             store = global_store()
             already = {normalize_token(x.get("Ticker")) for x in store["added"]}
             base = {normalize_token(x.get("Ticker")) for x in DEFAULT_WATCHLIST}
-
             if normalize_token(resolved_ticker) in base:
                 st.info("Dieser Wert ist schon in der festen Watchlist enthalten.")
             elif normalize_token(resolved_ticker) in already:
@@ -728,6 +637,7 @@ with st.expander("➕ Aktie hinzufügen (alle sehen sie, solange die App läuft)
                 )
                 st.success(f"Hinzugefügt: {resolved_ticker} – {name_final}")
 
+    # Entfernen nur für “eigene” Additions
     store = global_store()
     mine = [x for x in store["added"] if x.get("added_by") == sid]
     if mine:
@@ -738,13 +648,12 @@ with st.expander("➕ Aktie hinzufügen (alle sehen sie, solange die App läuft)
             idx = opts.index(sel)
             to_del = mine[idx]
             store["added"] = [x for x in store["added"] if x is not to_del]
-            st.success("Gelöscht. (Hinweis: Ohne Datenbank kann nach Neustart alles weg sein.)")
+            st.success("Gelöscht. (Hinweis: Alles ohne Datenbank – kann nach Neustart weg sein.)")
     else:
         st.caption("Du hast in dieser Sitzung noch nichts hinzugefügt.")
 
-
 # ============================================================
-# Filter Watchlist
+# Build final watchlist + filter by search
 # ============================================================
 wl = current_watchlist()
 
@@ -764,28 +673,29 @@ def filter_watchlist(rows: list[dict], q: str) -> list[dict]:
 
 wl_filtered = filter_watchlist(wl, query)
 
+# ============================================================
+# Fetch & compute (button triggers, but keep cached results)
+# ============================================================
+if "last_df" not in st.session_state:
+    st.session_state.last_df = None
+if "last_run_at" not in st.session_state:
+    st.session_state.last_run_at = None
 
-# ============================================================
-# Fetch & compute (nur bei Klick oder erstem Start)
-# ============================================================
 if run_now or st.session_state.last_df is None:
-    st.session_state.last_run_epoch = time.time()
-
     rows = []
     errors = []
-
     for r in wl_filtered:
         tk = normalize_token(r.get("Ticker"))
         if not tk:
             continue
         try:
-            info = fetch_stock_info_cached(tk)
+            info = fetch_stock_info(tk)
 
-            # WKN/ISIN aus watchlist “drüberkopieren”
+            # WKN/ISIN aus watchlist “drüberkopieren”, falls vorhanden
             info["WKN"] = r.get("WKN", "")
             info["ISIN"] = r.get("ISIN", "")
 
-            # Score
+            # Profi-Score
             s = compute_score(info)
             info.update(s)
 
@@ -794,15 +704,15 @@ if run_now or st.session_state.last_df is None:
             errors.append((tk, str(e)))
 
     df = pd.DataFrame(rows)
+
     st.session_state.last_df = df
     st.session_state.last_run_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     st.session_state.last_errors = errors
 
 df = st.session_state.last_df if st.session_state.last_df is not None else pd.DataFrame()
 
-
 # ============================================================
-# Display – Top 10 + Watchlist (Optik wie davor) + Pfeile
+# Display – Top 10 + Watchlist (ohne doppelte Top10 in Gesamt)
 # ============================================================
 st.subheader("🏆 Top 10 (nach Score)")
 st.caption(f"Zuletzt aktualisiert: {st.session_state.last_run_at or '—'}")
@@ -810,37 +720,11 @@ st.caption(f"Zuletzt aktualisiert: {st.session_state.last_run_at or '—'}")
 if df.empty:
     st.info("Noch keine Daten. Klick auf **Aktualisieren**.")
 else:
+    # Top 10 nach Score
     df_sorted = df.sort_values(by=["Score (0–10)"], ascending=False).reset_index(drop=True)
-    df_sorted["Rang"] = range(1, len(df_sorted) + 1)
-
-    prev = st.session_state.prev_snapshot or {}
-
-    def calc_delta_rank(tk: str, curr_rank: int) -> int | None:
-        p = prev.get(tk)
-        if not p:
-            return None
-        return p.get("Rang") - curr_rank  # + = besser
-
-    def calc_delta_score(tk: str, curr_score: float | None) -> float | None:
-        p = prev.get(tk)
-        if not p:
-            return None
-        ps = p.get("Score")
-        if curr_score is None or ps is None:
-            return None
-        return round(curr_score - ps, 2)
-
-    df_sorted["Δ Rang"] = df_sorted.apply(lambda x: calc_delta_rank(str(x["Ticker"]).upper(), int(x["Rang"])), axis=1)
-    df_sorted["Δ Score"] = df_sorted.apply(lambda x: calc_delta_score(str(x["Ticker"]).upper(), to_float(x["Score (0–10)"])), axis=1)
-    df_sorted["Pfeil"] = df_sorted["Δ Rang"].apply(lambda dr: delta_arrow(dr))
-
     top10 = df_sorted.head(10).copy()
-    top10_tickers = set(top10["Ticker"].astype(str).str.upper().tolist())
-    rest = df_sorted[~df_sorted["Ticker"].astype(str).str.upper().isin(top10_tickers)].copy()
 
     cols_top = [
-        "Pfeil",
-        "Rang",
         "Ampel",
         "Entscheidung",
         "Score (0–10)",
@@ -851,33 +735,19 @@ else:
         "KGV",
         "Erwartung (Analysten-Ziel, €)",
         "Upside zum Ziel (%)",
-        "Δ Score",
     ]
     cols_top = [c for c in cols_top if c in top10.columns]
-
-    # ✅ Tabellen-Optik wie davor, aber klickbar via Selection
-    sel_top = st.dataframe(
-        top10[cols_top],
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        hide_index=True,
-    )
-
-    # Wenn Zeile gewählt: merken wir den Ticker als "why"
-    try:
-        if sel_top and sel_top.get("selection") and sel_top["selection"].get("rows"):
-            ridx = sel_top["selection"]["rows"][0]
-            if 0 <= ridx < len(top10):
-                st.session_state.why_ticker = str(top10.iloc[ridx]["Ticker"]).upper()
-    except Exception:
-        pass
+    st.dataframe(top10[cols_top], use_container_width=True)
 
     st.markdown("")
+
     st.subheader("📋 Gesamte Watchlist")
+    # Gesamt ohne Top10 (damit nicht doppelt angezeigt)
+    top10_tickers = set(top10["Ticker"].astype(str).str.upper().tolist()) if "Ticker" in top10.columns else set()
+    rest = df_sorted[~df_sorted["Ticker"].astype(str).str.upper().isin(top10_tickers)].copy()
+
+    # Suchfeld wirkt auch auf die Gesamtwatchlist (weil wl_filtered)
     cols_all = [
-        "Pfeil",
-        "Rang",
         "Ampel",
         "Entscheidung",
         "Score (0–10)",
@@ -888,47 +758,21 @@ else:
         "KGV",
         "Erwartung (Analysten-Ziel, €)",
         "Upside zum Ziel (%)",
-        "Δ Score",
         "Sektor",
     ]
     cols_all = [c for c in cols_all if c in rest.columns]
-
-    sel_rest = st.dataframe(
-        rest[cols_all],
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        hide_index=True,
-    )
-
-    try:
-        if sel_rest and sel_rest.get("selection") and sel_rest["selection"].get("rows"):
-            ridx = sel_rest["selection"]["rows"][0]
-            if 0 <= ridx < len(rest):
-                st.session_state.why_ticker = str(rest.iloc[ridx]["Ticker"]).upper()
-    except Exception:
-        pass
-
-    # “Warum?” (Option 2): Erklärung im Details-Aufklapper (oder direkt unten als Hilfe)
-    if st.session_state.why_ticker:
-        tk = st.session_state.why_ticker
-        crow = df_sorted[df_sorted["Ticker"].astype(str).str.upper() == tk]
-        if not crow.empty:
-            curr = crow.iloc[0].to_dict()
-            prev_row = prev.get(tk)
-            with st.expander(f"Warum? – {tk} (Positions-/Datenänderung)", expanded=False):
-                for line in why_from_prev(curr, prev_row):
-                    st.write(f"- {line}")
-                st.caption("Hinweis: Vergleich seit dem letzten Aktualisieren. (Beim ersten Lauf gibt’s noch keinen Vergleich.)")
+    st.dataframe(rest[cols_all], use_container_width=True)
 
     # ============================================================
-    # Details & News je Aktie (aufklappbar) – Option 2 „Warum?“ hier
+    # Details pro Aktie – aufklappbar (clean)
     # ============================================================
     st.markdown("")
     st.subheader("🔎 Details & News je Aktie (aufklappen)")
 
+    # Auswahl-Liste (Top10 zuerst)
     display_order = pd.concat([top10, rest], ignore_index=True)
     options = display_order["Ticker"].astype(str).tolist()
+    # Mehrfachauswahl
     selected = st.multiselect(
         "Wähle eine oder mehrere Aktien aus",
         options=options,
@@ -940,31 +784,27 @@ else:
         if row.empty:
             continue
         r = row.iloc[0].to_dict()
-        tk_up = str(tk).upper()
 
-        header = f'{r.get("Ampel","")}  {r.get("Pfeil","")}  {tk_up} – {r.get("Name","")}'
+        header = f'{r.get("Ampel","")}  {tk} – {r.get("Name","")}'
         with st.expander(header, expanded=False):
+            # kompakte “Karten”-Daten
             cA, cB, cC = st.columns(3)
             with cA:
-                st.metric("Kurs (€)", fmt_eur(r.get("Kurs (€)")))
-                st.metric("KGV", fmt_num(r.get("KGV"), 1))
+                st.metric("Kurs (€)", f'{r.get("Kurs (€)"):.2f}' if to_float(r.get("Kurs (€)")) is not None else "—")
+                st.metric("KGV", f'{r.get("KGV"):.1f}' if to_float(r.get("KGV")) is not None else "—")
             with cB:
-                st.metric("Erwartung (€)", fmt_eur(r.get("Erwartung (Analysten-Ziel, €)")))
-                st.metric("Upside (%)", fmt_pct(r.get("Upside zum Ziel (%)"), 1))
+                st.metric("Erwartung (€)", f'{r.get("Erwartung (Analysten-Ziel, €)"):.2f}' if to_float(r.get("Erwartung (Analysten-Ziel, €)")) is not None else "—")
+                st.metric("Upside (%)", f'{r.get("Upside zum Ziel (%)"):.1f}%' if to_float(r.get("Upside zum Ziel (%)")) is not None else "—")
             with cC:
-                st.metric("Score (0–10)", fmt_num(r.get("Score (0–10)"), 2))
+                st.metric("Score (0–10)", f'{r.get("Score (0–10)"):.2f}' if to_float(r.get("Score (0–10)")) is not None else "—")
                 st.write(f'**Profil:** {r.get("Profil","—")}')
+                if r.get("Sektor"):
+                    st.caption(f'Sektor: {r.get("Sektor")}')
 
             st.markdown("**Kurzbegründung:**")
             st.write(r.get("Begründung (kurz)", "—"))
 
-            # ✅ Option 2: Warum nur hier
-            if st.button("Warum hat sich der Rang geändert?", key=f"why_btn_{tk_up}"):
-                prev_row = prev.get(tk_up)
-                st.markdown("**Warum? (seit letztem Update)**")
-                for line in why_from_prev(r, prev_row):
-                    st.write(f"- {line}")
-
+            # Kennzahlen klein & übersichtlich
             mini = {
                 "Umsatzwachstum YoY (%)": r.get("Umsatzwachstum YoY (%)"),
                 "Operative Marge (%)": r.get("Operative Marge (%)"),
@@ -976,71 +816,54 @@ else:
                 "WKN": r.get("WKN"),
                 "ISIN": r.get("ISIN"),
             }
-            st.dataframe(pd.DataFrame([mini]), use_container_width=True, hide_index=True)
+            mini_df = pd.DataFrame([mini])
+            st.dataframe(mini_df, use_container_width=True)
 
+            # Aktien-News (nur wenn es welche gibt)
             st.markdown("**Aktien-News (aktuell & relevant):**")
-            news = fetch_stock_news_yf(tk_up, days_back=60, max_items=6)
+            news = fetch_stock_news_yf(tk, days_back=60, max_items=6)
             if not news:
                 st.caption("Keine passenden aktuellen News gefunden.")
             else:
+                # klein, dann zum großen öffnen: erst 2, Rest im Expander
                 first = news[:2]
                 restn = news[2:]
                 for it in first:
                     ts = it["Zeit"].strftime("%d.%m.%Y") if it.get("Zeit") else ""
-                    st.markdown(
-                        f'- [{it["Titel"]}]({it["Link"]})  \n'
-                        f'<span class="small-muted">{it.get("Quelle","")} • {ts}</span>',
-                        unsafe_allow_html=True
-                    )
+                    st.markdown(f'- [{it["Titel"]}]({it["Link"]})  \n  <span style="opacity:.75">{it.get("Quelle","")} • {ts}</span>', unsafe_allow_html=True)
                 if restn:
                     with st.expander("Mehr Aktien-News anzeigen", expanded=False):
                         for it in restn:
                             ts = it["Zeit"].strftime("%d.%m.%Y") if it.get("Zeit") else ""
-                            st.markdown(
-                                f'- [{it["Titel"]}]({it["Link"]})  \n'
-                                f'<span class="small-muted">{it.get("Quelle","")} • {ts}</span>',
-                                unsafe_allow_html=True
-                            )
-
-    # Snapshot nach Rendern speichern (für nächstes Update)
-    st.session_state.prev_snapshot = build_snapshot(df_sorted)
-
+                            st.markdown(f'- [{it["Titel"]}]({it["Link"]})  \n  <span style="opacity:.75">{it.get("Quelle","")} • {ts}</span>', unsafe_allow_html=True)
 
 # ============================================================
-# Welt-News
+# Welt-News (nur wenn toggle an UND wirklich etwas da ist)
 # ============================================================
 if show_global_news:
     st.markdown("")
-    st.subheader("🌍 Weltweite Schlagzeilen (seriöse RSS-Feeds)")
+    st.subheader("🌍 Weltweite Schlagzeilen (aus seriösen RSS-Feeds)")
     global_news = fetch_global_news(days_back=60, max_items=10)
 
     if not global_news:
         st.caption("Keine neuen/geeigneten Welt-Schlagzeilen in den letzten Wochen gefunden.")
     else:
+        # klein starten, dann “groß” aufklappen
         head = global_news[:4]
         tail = global_news[4:]
 
         for it in head:
             ts = it["Zeit"].astimezone().strftime("%d.%m.%Y") if it.get("Zeit") else ""
-            st.markdown(
-                f'- [{it["Titel"]}]({it["Link"]})  \n'
-                f'<span class="small-muted">{it["Quelle"]} • {ts}</span>',
-                unsafe_allow_html=True
-            )
+            st.markdown(f'- [{it["Titel"]}]({it["Link"]})  \n  <span style="opacity:.75">{it["Quelle"]} • {ts}</span>', unsafe_allow_html=True)
 
         if tail:
             with st.expander("Mehr Welt-News anzeigen", expanded=False):
                 for it in tail:
                     ts = it["Zeit"].astimezone().strftime("%d.%m.%Y") if it.get("Zeit") else ""
-                    st.markdown(
-                        f'- [{it["Titel"]}]({it["Link"]})  \n'
-                        f'<span class="small-muted">{it["Quelle"]} • {ts}</span>',
-                        unsafe_allow_html=True
-                    )
-
+                    st.markdown(f'- [{it["Titel"]}]({it["Link"]})  \n  <span style="opacity:.75">{it["Quelle"]} • {ts}</span>', unsafe_allow_html=True)
 
 # ============================================================
-# Errors
+# Errors (wenn vorhanden)
 # ============================================================
 errs = st.session_state.get("last_errors", [])
 if errs:
@@ -1049,9 +872,8 @@ if errs:
         for tk, msg in errs:
             st.write(f"- **{tk}**: {msg}")
 
-
 # ============================================================
-# Footer / Kurz-Erklärung
+# Footer / Kurz-Erklärung (super kurz)
 # ============================================================
 st.markdown("---")
 with st.expander("ℹ️ So funktioniert das Bewertungssystem (kurz)", expanded=False):
@@ -1059,15 +881,11 @@ with st.expander("ℹ️ So funktioniert das Bewertungssystem (kurz)", expanded=
         """
 **Score (0–10)** = gewichtete Punkte aus:
 - **Wachstum**, **Profitabilität**, **Cashflow**, **Verschuldung**, **KGV**, **Erwartung (Analysten-Ziel)**  
-
 Ampel:
 - 🟢 **≥ 7.0** = Kaufen
 - 🟡 **≥ 5.5** = Beobachten
 - 🔴 **< 5.5** = Nicht kaufen
 
-Pfeile (Positionsänderung):
-- **▲** = im Ranking gestiegen, **▼** = gefallen, **⏺/—** = keine/unklar (z.B. beim ersten Lauf)
-- Vergleich funktioniert, sobald du mindestens **2× aktualisiert** hast.
-- „Warum?“ siehst du im **Details-Aufklapper** per Button.
+Hinweis: Ohne Datenbank sind „Hinzufügen“-Einträge **nicht garantiert dauerhaft** (sie können nach Neustart weg sein).
 """
-    )
+    )   das ist jetzt der code kann ich diesen einfach ersetzten?
