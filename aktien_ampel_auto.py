@@ -1,5 +1,5 @@
 # aktien_ampel_auto.py
-# requirements.txt:
+# WICHTIG (requirements.txt):
 # streamlit
 # pandas
 # yfinance
@@ -27,6 +27,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# Handy-clean: etwas weniger “Luft”, aber nicht zu eng
 st.markdown(
     """
 <style>
@@ -36,7 +37,6 @@ st.markdown(
     .stExpander { border-radius: 12px; }
     .stButton > button { border-radius: 12px; }
     .small-muted { opacity: .75; font-size: .9rem; }
-    .row-card { padding: .35rem .25rem; border-bottom: 1px solid rgba(255,255,255,.06); }
 </style>
 """,
     unsafe_allow_html=True,
@@ -67,6 +67,27 @@ def safe_get(d: dict, key: str):
     if val in [None, "None", "nan"]:
         return None
     return val
+
+
+def fmt_eur(x):
+    v = to_float(x)
+    if v is None:
+        return "—"
+    return f"{v:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def fmt_num(x, d=2):
+    v = to_float(x)
+    if v is None:
+        return "—"
+    return f"{v:.{d}f}"
+
+
+def fmt_pct(x, d=1):
+    v = to_float(x)
+    if v is None:
+        return "—"
+    return f"{v:.{d}f}%"
 
 
 @st.cache_data(ttl=60 * 30)
@@ -109,31 +130,11 @@ def normalize_token(s: str) -> str:
     return (s or "").strip().upper()
 
 
-def fmt_eur(x):
-    v = to_float(x)
-    if v is None:
-        return "—"
-    return f"{v:,.2f} €".replace(",", "X").replace(".", ",").replace("X", ".")
-
-
-def fmt_num(x, d=1):
-    v = to_float(x)
-    if v is None:
-        return "—"
-    return f"{v:.{d}f}"
-
-
-def fmt_pct(x, d=1):
-    v = to_float(x)
-    if v is None:
-        return "—"
-    return f"{v:.{d}f}%"
-
-
 # ============================================================
 # Deine feste Watchlist (ohne ETFs) + Mapping für WKN/ISIN
 # ============================================================
 DEFAULT_WATCHLIST = [
+    # Big Tech / Megatrend
     {"Ticker": "GOOGL", "Name": "Alphabet Inc.", "WKN": "", "ISIN": ""},
     {"Ticker": "MSFT",  "Name": "Microsoft Corporation", "WKN": "", "ISIN": ""},
     {"Ticker": "TSM",   "Name": "Taiwan Semiconductor Manufacturing", "WKN": "", "ISIN": ""},
@@ -142,6 +143,7 @@ DEFAULT_WATCHLIST = [
     {"Ticker": "NFLX",  "Name": "Netflix", "WKN": "", "ISIN": ""},
     {"Ticker": "SHOP",  "Name": "Shopify", "WKN": "", "ISIN": ""},
 
+    # DACH/CH
     {"Ticker": "SAP.DE",  "Name": "SAP SE", "WKN": "", "ISIN": ""},
     {"Ticker": "ROG.SW",  "Name": "Roche Holding", "WKN": "", "ISIN": ""},
     {"Ticker": "NOVN.SW", "Name": "Novartis", "WKN": "", "ISIN": ""},
@@ -152,6 +154,7 @@ DEFAULT_WATCHLIST = [
     {"Ticker": "SIE.DE",  "Name": "Siemens", "WKN": "", "ISIN": ""},
     {"Ticker": "ENR.DE",  "Name": "Siemens Energy", "WKN": "", "ISIN": ""},
 
+    # US Defensiv / Quality
     {"Ticker": "KO",    "Name": "Coca-Cola", "WKN": "", "ISIN": ""},
     {"Ticker": "MCD",   "Name": "McDonald's", "WKN": "", "ISIN": ""},
     {"Ticker": "JNJ",   "Name": "Johnson & Johnson", "WKN": "", "ISIN": ""},
@@ -161,13 +164,18 @@ DEFAULT_WATCHLIST = [
     {"Ticker": "XOM",   "Name": "Exxon Mobil", "WKN": "", "ISIN": ""},
     {"Ticker": "WM",    "Name": "Waste Management", "WKN": "", "ISIN": ""},
 
+    # Cyber / Biotech
     {"Ticker": "CRWD",  "Name": "CrowdStrike", "WKN": "", "ISIN": ""},
     {"Ticker": "NTLA",  "Name": "Intellia Therapeutics", "WKN": "", "ISIN": ""},
 
+    # EU/CH/NO
     {"Ticker": "NESN.SW", "Name": "Nestlé", "WKN": "", "ISIN": ""},
     {"Ticker": "NVO",     "Name": "Novo Nordisk ADR", "WKN": "", "ISIN": ""},
 
+    # ABB (je nach Börse: ABB oder ABBN.SW)
     {"Ticker": "ABB",   "Name": "ABB", "WKN": "", "ISIN": ""},
+
+    # Trust (optional)
     {"Ticker": "SMT.L", "Name": "Scottish Mortgage Investment Trust", "WKN": "", "ISIN": ""},
 ]
 
@@ -189,9 +197,12 @@ def build_lookup_index(rows: list[dict]) -> tuple[dict, dict, dict]:
     return by_ticker, by_wkn, by_isin
 
 
+# ============================================================
+# Shared “global” additions (ohne DB)
+# ============================================================
 @st.cache_resource
 def global_store():
-    return {"added": []}
+    return {"added": []}  # list of dicts
 
 
 def get_session_id() -> str:
@@ -212,7 +223,7 @@ def current_watchlist() -> list[dict]:
 
 
 # ============================================================
-# Scoring (ohne Fair Value)
+# Scoring (ohne Fair Value) – 7/10 = Kaufen
 # ============================================================
 def score_kgv(pe: float | None) -> tuple[int, str]:
     if pe is None or pe <= 0:
@@ -335,10 +346,39 @@ def trend_profil(sector: str | None, rev_growth_pct: float | None, beta: float |
     return "⚖️ Neutral"
 
 
-@st.cache_data(ttl=60 * 15)
-def fetch_stock_info(ticker: str) -> dict:
-    t = yf.Ticker(ticker)
-    info = t.get_info() or {}
+# ============================================================
+# Rate-limit Fix: Cooldown + sanfter Retry
+# ============================================================
+COOLDOWN_SECONDS = 45
+
+def can_run_now() -> bool:
+    last = st.session_state.get("last_run_epoch")
+    if last is None:
+        return True
+    return (time.time() - last) >= COOLDOWN_SECONDS
+
+
+def cooldown_left() -> int:
+    last = st.session_state.get("last_run_epoch")
+    if last is None:
+        return 0
+    left = int(COOLDOWN_SECONDS - (time.time() - last))
+    return max(0, left)
+
+
+def get_info_with_retry(ticker: str, retries: int = 2):
+    for i in range(retries + 1):
+        try:
+            return yf.Ticker(ticker).get_info() or {}
+        except Exception:
+            if i == retries:
+                return {}
+            time.sleep(1.0 + i * 2.0)
+
+
+@st.cache_data(ttl=60 * 30)  # länger cache => weniger Requests
+def fetch_stock_info_cached(ticker: str) -> dict:
+    info = get_info_with_retry(ticker, retries=2)
 
     price = to_float(safe_get(info, "currentPrice")) or to_float(safe_get(info, "regularMarketPrice"))
     pe = to_float(safe_get(info, "trailingPE")) or to_float(safe_get(info, "forwardPE"))
@@ -430,7 +470,12 @@ def compute_score(row: dict) -> dict:
         s_an * weights["Erwartung"]
     )
 
-    profil = trend_profil(row.get("Sektor"), to_float(rev), to_float(row.get("Beta")), to_float(row.get("Dividendenrendite (%)")))
+    profil = trend_profil(
+        row.get("Sektor"),
+        to_float(rev),
+        to_float(row.get("Beta")),
+        to_float(row.get("Dividendenrendite (%)")),
+    )
 
     return {
         "Score (0–10)": round(score, 2),
@@ -439,6 +484,72 @@ def compute_score(row: dict) -> dict:
         "Profil": profil,
         "Begründung (kurz)": " | ".join([r_pe, r_rev, r_mar, r_de, r_fcf, r_an]),
     }
+
+
+# ============================================================
+# Positionsänderung (Δ Rang) + “Warum?”
+# ============================================================
+def delta_arrow(delta_rank: int | None) -> str:
+    if delta_rank is None:
+        return "⏺"
+    if delta_rank > 0:
+        return f"▲{int(delta_rank)}"
+    if delta_rank < 0:
+        return f"▼{abs(int(delta_rank))}"
+    return "—"
+
+
+def build_snapshot(df_sorted: pd.DataFrame) -> dict:
+    snap = {}
+    for i, r in df_sorted.reset_index(drop=True).iterrows():
+        tk = str(r.get("Ticker", "")).upper()
+        if not tk:
+            continue
+        snap[tk] = {
+            "Rang": int(i + 1),
+            "Score": to_float(r.get("Score (0–10)")),
+            "KGV": to_float(r.get("KGV")),
+            "Wachstum": to_float(r.get("Umsatzwachstum YoY (%)")),
+            "Marge": to_float(r.get("Operative Marge (%)")),
+            "FCF": to_float(r.get("FCF-Marge (%)")),
+            "DE": to_float(r.get("Debt/Equity")),
+            "Upside": to_float(r.get("Upside zum Ziel (%)")),
+        }
+    return snap
+
+
+def why_from_prev(curr: dict, prev: dict | None) -> list[str]:
+    if not prev:
+        return ["Neu oder zuvor nicht vorhanden → kein Vergleich möglich."]
+
+    def ch(label, c, p, unit=""):
+        c = to_float(c)
+        p = to_float(p)
+        if c is None or p is None:
+            return None
+        d = c - p
+        if abs(d) < 1e-9:
+            return None
+        sign = "↑" if d > 0 else "↓"
+        return (abs(d), f"{label}: {p:.2f}{unit} → {c:.2f}{unit} ({sign} {abs(d):.2f}{unit})")
+
+    changes = []
+    for item in [
+        ch("Score", curr.get("Score (0–10)"), prev.get("Score")),
+        ch("KGV", curr.get("KGV"), prev.get("KGV")),
+        ch("Wachstum", curr.get("Umsatzwachstum YoY (%)"), prev.get("Wachstum"), "%"),
+        ch("Marge", curr.get("Operative Marge (%)"), prev.get("Marge"), "%"),
+        ch("FCF-Marge", curr.get("FCF-Marge (%)"), prev.get("FCF"), "%"),
+        ch("Debt/Equity", curr.get("Debt/Equity"), prev.get("DE")),
+        ch("Upside", curr.get("Upside zum Ziel (%)"), prev.get("Upside"), "%"),
+    ]:
+        if item:
+            changes.append(item)
+
+    changes.sort(key=lambda x: x[0], reverse=True)
+    if not changes:
+        return ["Keine relevanten Änderungen in den Daten gefunden (oder Daten fehlen)."]
+    return [t for _, t in changes[:4]]
 
 
 # ============================================================
@@ -517,67 +628,27 @@ def fetch_stock_news_yf(ticker: str, days_back: int = 60, max_items: int = 6) ->
 
 
 # ============================================================
-# WHY? (Positionsänderung erklären)
-# ============================================================
-def build_prev_rank_map(df_sorted: pd.DataFrame) -> dict:
-    # Map: ticker -> snapshot
-    out = {}
-    for i, r in df_sorted.reset_index(drop=True).iterrows():
-        tk = str(r.get("Ticker", "")).upper()
-        if not tk:
-            continue
-        out[tk] = {
-            "Rang": int(i + 1),
-            "Score": to_float(r.get("Score (0–10)")),
-            "KGV": to_float(r.get("KGV")),
-            "Wachstum": to_float(r.get("Umsatzwachstum YoY (%)")),
-            "Marge": to_float(r.get("Operative Marge (%)")),
-            "FCF": to_float(r.get("FCF-Marge (%)")),
-            "DE": to_float(r.get("Debt/Equity")),
-            "Upside": to_float(r.get("Upside zum Ziel (%)")),
-            "Kurs": to_float(r.get("Kurs (€)")),
-        }
-    return out
-
-
-def why_from_prev(curr_row: dict, prev_row: dict | None) -> list[str]:
-    if not prev_row:
-        return ["Neu oder zuvor nicht vorhanden → kein Vergleich."]
-
-    changes = []
-
-    def add(label, curr, prev, unit="", bigger_is_better=True):
-        c = to_float(curr)
-        p = to_float(prev)
-        if c is None or p is None:
-            return
-        d = c - p
-        if abs(d) < 1e-9:
-            return
-        # Bewertung: bei KGV ist kleiner besser
-        sign = "↑" if d > 0 else "↓"
-        nice = f"{label}: {p:.2f}{unit} → {c:.2f}{unit} ({sign} {abs(d):.2f}{unit})"
-        changes.append((abs(d), nice))
-
-    add("Score", curr_row.get("Score (0–10)"), prev_row.get("Score"), "", True)
-    add("Kurs €", curr_row.get("Kurs (€)"), prev_row.get("Kurs"), "€", True)
-    add("KGV", curr_row.get("KGV"), prev_row.get("KGV"), "", False)
-    add("Wachstum", curr_row.get("Umsatzwachstum YoY (%)"), prev_row.get("Wachstum"), "%", True)
-    add("Marge", curr_row.get("Operative Marge (%)"), prev_row.get("Marge"), "%", True)
-    add("FCF-Marge", curr_row.get("FCF-Marge (%)"), prev_row.get("FCF"), "%", True)
-    add("Debt/Equity", curr_row.get("Debt/Equity"), prev_row.get("DE"), "", False)
-    add("Upside", curr_row.get("Upside zum Ziel (%)"), prev_row.get("Upside"), "%", True)
-
-    changes.sort(key=lambda x: x[0], reverse=True)
-    top = [txt for _, txt in changes[:4]] if changes else ["Keine relevanten Änderungen in den Daten gefunden."]
-    return top
-
-
-# ============================================================
 # UI – Header
 # ============================================================
 st.title("📌 Watchlist + Bewertung (Score) – clean für Handy")
-st.caption("Bewertung ohne Fair Value. 7/10 bleibt **KAUFEN**. KGV wird immer angezeigt. Erwartungen = Analysten-Ziel in €.")
+st.caption("Optik wie davor – plus **Pfeile für Positionsänderung**. Klick auf den Pfeil/Zeile → Details → „Warum?“.")
+
+
+# ============================================================
+# Session State
+# ============================================================
+if "last_df" not in st.session_state:
+    st.session_state.last_df = None
+if "last_run_at" not in st.session_state:
+    st.session_state.last_run_at = None
+if "last_errors" not in st.session_state:
+    st.session_state.last_errors = []
+if "prev_snapshot" not in st.session_state:
+    st.session_state.prev_snapshot = None  # ticker -> snapshot
+if "why_ticker" not in st.session_state:
+    st.session_state.why_ticker = None
+if "last_run_epoch" not in st.session_state:
+    st.session_state.last_run_epoch = None
 
 
 # ============================================================
@@ -594,7 +665,9 @@ with st.container():
     with c2:
         colA, colB = st.columns(2)
         with colA:
-            run_now = st.button("🔄 Aktualisieren", type="primary", use_container_width=True)
+            disabled = not can_run_now()
+            label = "🔄 Aktualisieren" if not disabled else f"⏳ Bitte warten ({cooldown_left()}s)"
+            run_now = st.button(label, type="primary", use_container_width=True, disabled=disabled)
         with colB:
             show_global_news = st.toggle("🌍 Welt-News", value=True)
 
@@ -629,7 +702,7 @@ with st.expander("➕ Aktie hinzufügen (alle sehen sie, solange die App läuft)
             name_final = add_name.strip()
             if not name_final:
                 try:
-                    info = fetch_stock_info(resolved_ticker)
+                    info = fetch_stock_info_cached(resolved_ticker)
                     name_final = info.get("Name") or resolved_ticker
                 except Exception:
                     name_final = resolved_ticker
@@ -693,18 +766,11 @@ wl_filtered = filter_watchlist(wl, query)
 
 
 # ============================================================
-# Fetch & compute + Ranking snapshot
+# Fetch & compute (nur bei Klick oder erstem Start)
 # ============================================================
-if "last_df" not in st.session_state:
-    st.session_state.last_df = None
-if "last_run_at" not in st.session_state:
-    st.session_state.last_run_at = None
-if "prev_rank" not in st.session_state:
-    st.session_state.prev_rank = None
-if "why_target" not in st.session_state:
-    st.session_state.why_target = None
-
 if run_now or st.session_state.last_df is None:
+    st.session_state.last_run_epoch = time.time()
+
     rows = []
     errors = []
 
@@ -713,12 +779,16 @@ if run_now or st.session_state.last_df is None:
         if not tk:
             continue
         try:
-            info = fetch_stock_info(tk)
+            info = fetch_stock_info_cached(tk)
+
+            # WKN/ISIN aus watchlist “drüberkopieren”
             info["WKN"] = r.get("WKN", "")
             info["ISIN"] = r.get("ISIN", "")
 
+            # Score
             s = compute_score(info)
             info.update(s)
+
             rows.append(info)
         except Exception as e:
             errors.append((tk, str(e)))
@@ -732,7 +802,7 @@ df = st.session_state.last_df if st.session_state.last_df is not None else pd.Da
 
 
 # ============================================================
-# Display – Listen (Δ Rang vorne klickbar)
+# Display – Top 10 + Watchlist (Optik wie davor) + Pfeile
 # ============================================================
 st.subheader("🏆 Top 10 (nach Score)")
 st.caption(f"Zuletzt aktualisiert: {st.session_state.last_run_at or '—'}")
@@ -743,101 +813,116 @@ else:
     df_sorted = df.sort_values(by=["Score (0–10)"], ascending=False).reset_index(drop=True)
     df_sorted["Rang"] = range(1, len(df_sorted) + 1)
 
-    # Δ Rang / Δ Score aus prev_rank
-    prev_map = st.session_state.prev_rank or {}
+    prev = st.session_state.prev_snapshot or {}
 
-    def get_delta_rank(ticker: str, curr_rank: int):
-        pr = prev_map.get(ticker)
-        if not pr:
+    def calc_delta_rank(tk: str, curr_rank: int) -> int | None:
+        p = prev.get(tk)
+        if not p:
             return None
-        return pr.get("Rang") - curr_rank  # positiv = verbessert
+        return p.get("Rang") - curr_rank  # + = besser
 
-    def get_delta_score(ticker: str, curr_score: float | None):
-        pr = prev_map.get(ticker)
-        if not pr:
+    def calc_delta_score(tk: str, curr_score: float | None) -> float | None:
+        p = prev.get(tk)
+        if not p:
             return None
-        ps = pr.get("Score")
+        ps = p.get("Score")
         if curr_score is None or ps is None:
             return None
         return round(curr_score - ps, 2)
 
-    df_sorted["Δ Rang"] = df_sorted.apply(lambda x: get_delta_rank(str(x["Ticker"]).upper(), int(x["Rang"])), axis=1)
-    df_sorted["Δ Score"] = df_sorted.apply(lambda x: get_delta_score(str(x["Ticker"]).upper(), to_float(x["Score (0–10)"])), axis=1)
+    df_sorted["Δ Rang"] = df_sorted.apply(lambda x: calc_delta_rank(str(x["Ticker"]).upper(), int(x["Rang"])), axis=1)
+    df_sorted["Δ Score"] = df_sorted.apply(lambda x: calc_delta_score(str(x["Ticker"]).upper(), to_float(x["Score (0–10)"])), axis=1)
+    df_sorted["Pfeil"] = df_sorted["Δ Rang"].apply(lambda dr: delta_arrow(dr))
 
-    # nach dem Rendern speichern wir den aktuellen Snapshot als "vorher"
-    # -> aber erst am Ende, damit der Vergleich für diese Ansicht stimmt
     top10 = df_sorted.head(10).copy()
     top10_tickers = set(top10["Ticker"].astype(str).str.upper().tolist())
     rest = df_sorted[~df_sorted["Ticker"].astype(str).str.upper().isin(top10_tickers)].copy()
 
-    def delta_label(dr):
-        if dr is None:
-            return "⏺"
-        if dr > 0:
-            return f"🔼 +{int(dr)}"
-        if dr < 0:
-            return f"🔽 {int(dr)}"
-        return "⏸ 0"
+    cols_top = [
+        "Pfeil",
+        "Rang",
+        "Ampel",
+        "Entscheidung",
+        "Score (0–10)",
+        "Profil",
+        "Ticker",
+        "Name",
+        "Kurs (€)",
+        "KGV",
+        "Erwartung (Analysten-Ziel, €)",
+        "Upside zum Ziel (%)",
+        "Δ Score",
+    ]
+    cols_top = [c for c in cols_top if c in top10.columns]
 
-    def score_delta_label(ds):
-        if ds is None:
-            return ""
-        sign = "+" if ds > 0 else ""
-        return f"{sign}{ds:.2f}"
+    # ✅ Tabellen-Optik wie davor, aber klickbar via Selection
+    sel_top = st.dataframe(
+        top10[cols_top],
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        hide_index=True,
+    )
 
-    def render_list(title: str, frame: pd.DataFrame):
-        st.markdown(f"### {title}")
-
-        # Headerzeile (minimal)
-        h1, h2, h3, h4, h5, h6, h7 = st.columns([1.2, 1.1, 1.2, 1.4, 1.2, 1.0, 1.0])
-        h1.markdown("**Δ Rang**")
-        h2.markdown("**Ampel**")
-        h3.markdown("**Score**")
-        h4.markdown("**Ticker**")
-        h5.markdown("**Kurs**")
-        h6.markdown("**KGV**")
-        h7.markdown("**Δ Score**")
-
-        for _, r in frame.iterrows():
-            tk = str(r.get("Ticker", "")).upper()
-            dr = r.get("Δ Rang")
-            ds = r.get("Δ Score")
-            cols = st.columns([1.2, 1.1, 1.2, 1.4, 1.2, 1.0, 1.0])
-
-            # Δ Rang ist BUTTON -> Klick zeigt Warum
-            if cols[0].button(delta_label(dr), key=f"dr_{title}_{tk}"):
-                st.session_state.why_target = tk
-
-            cols[1].write(r.get("Ampel", ""))
-            cols[2].write(fmt_num(r.get("Score (0–10)"), 2))
-            cols[3].write(tk)
-            cols[4].write(fmt_eur(r.get("Kurs (€)")))
-            cols[5].write(fmt_num(r.get("KGV"), 1))
-            cols[6].write(score_delta_label(ds))
-
-        # Wenn jemand geklickt hat: Warum-Box anzeigen (unter der Liste)
-        if st.session_state.why_target:
-            tsel = st.session_state.why_target
-            crow = frame[frame["Ticker"].astype(str).str.upper() == tsel]
-            if not crow.empty:
-                curr = crow.iloc[0].to_dict()
-                prev = prev_map.get(tsel)
-                with st.expander(f"Warum? – {tsel}", expanded=True):
-                    for line in why_from_prev(curr, prev):
-                        st.write(f"- {line}")
-                    st.caption("Hinweis: Die Erklärung basiert auf den größten Änderungen seit dem letzten Aktualisieren.")
-
-    render_list("Top 10", top10)
+    # Wenn Zeile gewählt: merken wir den Ticker als "why"
+    try:
+        if sel_top and sel_top.get("selection") and sel_top["selection"].get("rows"):
+            ridx = sel_top["selection"]["rows"][0]
+            if 0 <= ridx < len(top10):
+                st.session_state.why_ticker = str(top10.iloc[ridx]["Ticker"]).upper()
+    except Exception:
+        pass
 
     st.markdown("")
     st.subheader("📋 Gesamte Watchlist")
-    if rest.empty:
-        st.caption("Keine weiteren Aktien.")
-    else:
-        render_list("Rest", rest)
+    cols_all = [
+        "Pfeil",
+        "Rang",
+        "Ampel",
+        "Entscheidung",
+        "Score (0–10)",
+        "Profil",
+        "Ticker",
+        "Name",
+        "Kurs (€)",
+        "KGV",
+        "Erwartung (Analysten-Ziel, €)",
+        "Upside zum Ziel (%)",
+        "Δ Score",
+        "Sektor",
+    ]
+    cols_all = [c for c in cols_all if c in rest.columns]
+
+    sel_rest = st.dataframe(
+        rest[cols_all],
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        hide_index=True,
+    )
+
+    try:
+        if sel_rest and sel_rest.get("selection") and sel_rest["selection"].get("rows"):
+            ridx = sel_rest["selection"]["rows"][0]
+            if 0 <= ridx < len(rest):
+                st.session_state.why_ticker = str(rest.iloc[ridx]["Ticker"]).upper()
+    except Exception:
+        pass
+
+    # “Warum?” (Option 2): Erklärung im Details-Aufklapper (oder direkt unten als Hilfe)
+    if st.session_state.why_ticker:
+        tk = st.session_state.why_ticker
+        crow = df_sorted[df_sorted["Ticker"].astype(str).str.upper() == tk]
+        if not crow.empty:
+            curr = crow.iloc[0].to_dict()
+            prev_row = prev.get(tk)
+            with st.expander(f"Warum? – {tk} (Positions-/Datenänderung)", expanded=False):
+                for line in why_from_prev(curr, prev_row):
+                    st.write(f"- {line}")
+                st.caption("Hinweis: Vergleich seit dem letzten Aktualisieren. (Beim ersten Lauf gibt’s noch keinen Vergleich.)")
 
     # ============================================================
-    # Details / News je Aktie
+    # Details & News je Aktie (aufklappbar) – Option 2 „Warum?“ hier
     # ============================================================
     st.markdown("")
     st.subheader("🔎 Details & News je Aktie (aufklappen)")
@@ -855,24 +940,30 @@ else:
         if row.empty:
             continue
         r = row.iloc[0].to_dict()
+        tk_up = str(tk).upper()
 
-        header = f'{r.get("Ampel","")}  {tk} – {r.get("Name","")}'
+        header = f'{r.get("Ampel","")}  {r.get("Pfeil","")}  {tk_up} – {r.get("Name","")}'
         with st.expander(header, expanded=False):
             cA, cB, cC = st.columns(3)
             with cA:
-                st.metric("Kurs (€)", f'{to_float(r.get("Kurs (€)")):.2f}' if to_float(r.get("Kurs (€)")) is not None else "—")
-                st.metric("KGV", f'{to_float(r.get("KGV")):.1f}' if to_float(r.get("KGV")) is not None else "—")
+                st.metric("Kurs (€)", fmt_eur(r.get("Kurs (€)")))
+                st.metric("KGV", fmt_num(r.get("KGV"), 1))
             with cB:
-                st.metric("Erwartung (€)", f'{to_float(r.get("Erwartung (Analysten-Ziel, €)")):.2f}' if to_float(r.get("Erwartung (Analysten-Ziel, €)")) is not None else "—")
-                st.metric("Upside (%)", f'{to_float(r.get("Upside zum Ziel (%)")):.1f}%' if to_float(r.get("Upside zum Ziel (%)")) is not None else "—")
+                st.metric("Erwartung (€)", fmt_eur(r.get("Erwartung (Analysten-Ziel, €)")))
+                st.metric("Upside (%)", fmt_pct(r.get("Upside zum Ziel (%)"), 1))
             with cC:
-                st.metric("Score (0–10)", f'{to_float(r.get("Score (0–10)")):.2f}' if to_float(r.get("Score (0–10)")) is not None else "—")
+                st.metric("Score (0–10)", fmt_num(r.get("Score (0–10)"), 2))
                 st.write(f'**Profil:** {r.get("Profil","—")}')
-                if r.get("Sektor"):
-                    st.caption(f'Sektor: {r.get("Sektor")}')
 
             st.markdown("**Kurzbegründung:**")
             st.write(r.get("Begründung (kurz)", "—"))
+
+            # ✅ Option 2: Warum nur hier
+            if st.button("Warum hat sich der Rang geändert?", key=f"why_btn_{tk_up}"):
+                prev_row = prev.get(tk_up)
+                st.markdown("**Warum? (seit letztem Update)**")
+                for line in why_from_prev(r, prev_row):
+                    st.write(f"- {line}")
 
             mini = {
                 "Umsatzwachstum YoY (%)": r.get("Umsatzwachstum YoY (%)"),
@@ -885,10 +976,10 @@ else:
                 "WKN": r.get("WKN"),
                 "ISIN": r.get("ISIN"),
             }
-            st.dataframe(pd.DataFrame([mini]), use_container_width=True)
+            st.dataframe(pd.DataFrame([mini]), use_container_width=True, hide_index=True)
 
             st.markdown("**Aktien-News (aktuell & relevant):**")
-            news = fetch_stock_news_yf(tk, days_back=60, max_items=6)
+            news = fetch_stock_news_yf(tk_up, days_back=60, max_items=6)
             if not news:
                 st.caption("Keine passenden aktuellen News gefunden.")
             else:
@@ -911,8 +1002,8 @@ else:
                                 unsafe_allow_html=True
                             )
 
-    # Speichere aktuellen Snapshot als "vorher" (für nächsten Klick auf Aktualisieren)
-    st.session_state.prev_rank = build_prev_rank_map(df_sorted)
+    # Snapshot nach Rendern speichern (für nächstes Update)
+    st.session_state.prev_snapshot = build_snapshot(df_sorted)
 
 
 # ============================================================
@@ -960,7 +1051,7 @@ if errs:
 
 
 # ============================================================
-# Footer
+# Footer / Kurz-Erklärung
 # ============================================================
 st.markdown("---")
 with st.expander("ℹ️ So funktioniert das Bewertungssystem (kurz)", expanded=False):
@@ -974,8 +1065,9 @@ Ampel:
 - 🟡 **≥ 5.5** = Beobachten
 - 🔴 **< 5.5** = Nicht kaufen
 
-Positionsänderung:
-- **Δ Rang** ist erst sichtbar, nachdem du mindestens **2× aktualisiert** hast.
-- Klick auf **Δ Rang** zeigt dir **Warum?** (größte Kennzahlen-Änderungen).
+Pfeile (Positionsänderung):
+- **▲** = im Ranking gestiegen, **▼** = gefallen, **⏺/—** = keine/unklar (z.B. beim ersten Lauf)
+- Vergleich funktioniert, sobald du mindestens **2× aktualisiert** hast.
+- „Warum?“ siehst du im **Details-Aufklapper** per Button.
 """
     )
